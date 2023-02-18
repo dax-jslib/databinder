@@ -1,0 +1,157 @@
+#!/usr/bin/python3
+
+'''
+This will work for python version >= 3.5, as previous versions do not have the pathlib library.
+watchdog must be installed on the local machine, else install using:
+    python -m pip install watchdog
+if pip is not installed, you can setup by
+    apt install python3-pip
+'''
+
+import sched, time, os
+import argparse, configparser, tempfile
+
+from datetime import datetime
+from watchdog.observers import Observer
+from watchdog.events import PatternMatchingEventHandler
+from pathlib import Path
+
+SCRIPT_FILE = Path(__file__).resolve()
+'the lib directory. This will be copied to the target during deployment'
+LIB_DIR = Path(SCRIPT_FILE.parent.parent).joinpath("lib")
+
+print("this script :", SCRIPT_FILE)
+print("lib dir     :", LIB_DIR)
+print("")
+
+'''
+This is the global scheduler and the currently scheduled event.
+The event corresponds to the most current execution of deployment that is scheduled.
+Using a scheduler ensures that multiple filesystem changes within a small window of time result in a
+single deployment run
+'''
+SCHEDULER = sched.scheduler()
+_genEvent = None
+
+# --------------------------------------------------------------------------------------------------
+def run_once():
+
+	print ("\n--- deployment started : {} ---".format(datetime.now()))
+	config = configparser.ConfigParser()
+	config.read("deploy.ini")
+
+	if config.has_section("main") == False:
+		print ("missing deploy.ini or [main] section ... bye!")
+		raise SystemExit
+
+	deployment_type = config.get("main", "deployment_type")
+	if deployment_type == "local":
+		deploy_local(config)
+	elif deployment_type == "remote":
+		deploy_remote(config)
+	else:
+		print ("invalid deployment type in deploy.ini. Valid values are local or remote")
+
+	print ("--- deployment end ---\n")
+
+# --------------------------------------------------------------------------------------------------
+def deploy_local(config) :
+	if config.has_section("local") == False:
+		print ("missing configuration for local deployment ... bye!")
+		raise SystemExit
+
+	deploy_dir = config.get("local", "dir")
+	if(deploy_dir == None) :
+		print("missing target location")
+		raise SystemExit
+
+	out_dir = Path(deploy_dir).expanduser()
+	'''creating output directory if it does not exist'''
+	cmd = "mkdir -p {}".format(out_dir)
+	print(cmd)
+	os.system(cmd)
+
+	'''copying lib'''
+	cmd = "rsync -avz --delete {}/ {}/".format(LIB_DIR, out_dir)
+	print(cmd)
+	os.system(cmd)
+
+# --------------------------------------------------------------------------------------------------
+def deploy_remote(config) :
+	if config.has_section("remote") == False:
+		print ("missing configuration for remote deployment ... bye!")
+		raise SystemExit
+
+	deploy_dir = config.get("remote", "dir")
+	user = config.get("remote", "user")
+	password = config.get("remote", "password")
+
+	if(deploy_dir == None) :
+		print("missing target location")
+		raise SystemExit
+
+	if(user == None) :
+		print("missing SSH user")
+		raise SystemExit
+
+	if(password == None) :
+		print("missing SSH password")
+		raise SystemExit
+
+	'''copying lib'''
+	cmd = "rsync -avz --delete --rsh=\"sshpass -p {} ssh -l {}\" {}/ {}/".format(
+		password, user, LIB_DIR, deploy_dir)
+	print(cmd)
+	os.system(cmd)
+
+
+# --------------------------------------------------------------------------------------------------
+def do_watch():
+	print("watching this project for changes")
+
+	obs = Observer()
+
+	h1 = PatternMatchingEventHandler(
+		patterns="*", ignore_patterns="", ignore_directories=True, case_sensitive=True)
+	h1.on_created = handle_event
+	h1.on_deleted = handle_event
+	h1.on_modified = handle_event
+	h1.on_moved = handle_event
+	obs.schedule(h1, LIB_DIR, recursive = True)
+	obs.start()
+
+	try:
+		while True:
+			SCHEDULER.run()
+			time.sleep(1)
+	except KeyboardInterrupt:
+		obs.stop()
+		obs.join()
+
+# --------------------------------------------------------------------------------------------------
+def handle_event(event):
+	global _runEvent
+	print ("{} : {}".format(event.event_type, Path(event.src_path).resolve()))
+	if SCHEDULER.empty() == False and _runEvent != None:
+		SCHEDULER.cancel(_runEvent)
+	_runEvent = SCHEDULER.enter(2, 1, generate_site)
+
+def generate_site():
+	global _runEvent
+	run_once()
+	_runEvent = None
+
+
+if __name__ == "__main__":
+
+	parser = argparse.ArgumentParser()
+	parser.add_argument("action", help="specified the action to perform. Valid values are runonce | watch")
+	cli_args = parser.parse_args()
+
+	if cli_args.action == "runonce":
+		run_once()
+	elif cli_args.action == "watch":
+		run_once()
+		do_watch()
+	else:
+		print ("invalid action {}. Valid values are runonce | watch".format(cli_args.action))

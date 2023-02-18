@@ -1,0 +1,10 @@
+[main]
+deployment_type = local | remote
+
+[local]
+dir = <local_path>
+
+[remote]
+dir = <ssh_host>:/<remote_path>
+user = <ssh_user>
+password = <ssh_password>
